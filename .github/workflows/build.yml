@@ -161,7 +161,7 @@ jobs:
                       }
                       setOnItemLongClickListener { _, _, i, _ ->
                           val pkg = shown[i].pkg
-                          AlertDialog.Builder(this@MainActivity)
+                          android.app.AlertDialog.Builder(this@MainActivity)
                               .setTitle(shown[i].label)
                               .setItems(arrayOf("App info", "Uninstall")) { _, w ->
                                   if (w == 0) startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$pkg")))
