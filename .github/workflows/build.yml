@@ -74,4 +74,137 @@ jobs:
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
                           <category android:name="android.intent.category.HOME"/>
-                          <category android:name="android.intent.category.DEFAULT
+                          <category android:name="android.intent.category.DEFAULT"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p JLauncher/app/src/main/java/com/vikranth/jlauncher
+          cat > JLauncher/app/src/main/java/com/vikranth/jlauncher/MainActivity.kt <<'EOF'
+          package com.vikranth.jlauncher
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.drawable.Drawable
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.text.Editable
+          import android.text.TextWatcher
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.*
+
+          class MainActivity : Activity() {
+
+              data class App(val label: String, val pkg: String, val icon: Drawable)
+
+              private var all = listOf<App>()
+              private val shown = mutableListOf<App>()
+              private lateinit var adapter: BaseAdapter
+              private lateinit var search: EditText
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(16), dp(40), dp(16), dp(8))
+                      setBackgroundColor(Color.argb(150, 0, 0, 0))
+                  }
+                  root.addView(TextClock(this).apply {
+                      format12Hour = "h:mm"; format24Hour = "HH:mm"
+                      textSize = 56f; setTextColor(Color.WHITE)
+                  })
+                  root.addView(TextClock(this).apply {
+                      format12Hour = "EEEE, d MMMM"; format24Hour = "EEEE, d MMMM"
+                      textSize = 16f; setTextColor(Color.LTGRAY)
+                  })
+                  search = EditText(this).apply {
+                      hint = "Search apps"; setHintTextColor(Color.GRAY)
+                      setTextColor(Color.WHITE); isSingleLine = true
+                      setBackgroundColor(Color.argb(60, 255, 255, 255))
+                      setPadding(dp(14), dp(10), dp(14), dp(10))
+                  }
+                  root.addView(search, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(20); bottomMargin = dp(12) })
+
+                  adapter = object : BaseAdapter() {
+                      override fun getCount() = shown.size
+                      override fun getItem(i: Int) = shown[i]
+                      override fun getItemId(i: Int) = i.toLong()
+                      override fun getView(i: Int, v: View?, p: ViewGroup?): View {
+                          val a = shown[i]
+                          val cell = LinearLayout(this@MainActivity).apply {
+                              orientation = LinearLayout.VERTICAL
+                              gravity = Gravity.CENTER_HORIZONTAL
+                              setPadding(0, dp(8), 0, dp(8))
+                          }
+                          cell.addView(ImageView(this@MainActivity).apply { setImageDrawable(a.icon) }, LinearLayout.LayoutParams(dp(48), dp(48)))
+                          cell.addView(TextView(this@MainActivity).apply {
+                              text = a.label; textSize = 11f; setTextColor(Color.WHITE)
+                              maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; gravity = Gravity.CENTER
+                          })
+                          return cell
+                      }
+                  }
+                  val grid = GridView(this).apply {
+                      numColumns = 4; adapter = this@MainActivity.adapter
+                      selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+                      setOnItemClickListener { _, _, i, _ ->
+                          packageManager.getLaunchIntentForPackage(shown[i].pkg)?.let { startActivity(it) }
+                      }
+                      setOnItemLongClickListener { _, _, i, _ ->
+                          val pkg = shown[i].pkg
+                          AlertDialog.Builder(this@MainActivity)
+                              .setTitle(shown[i].label)
+                              .setItems(arrayOf("App info", "Uninstall")) { _, w ->
+                                  if (w == 0) startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$pkg")))
+                                  else startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:$pkg")))
+                              }.show()
+                          true
+                      }
+                  }
+                  root.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
+                  setContentView(root)
+
+                  search.addTextChangedListener(object : TextWatcher {
+                      override fun afterTextChanged(s: Editable?) = filter()
+                      override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                  })
+              }
+
+              private fun load() {
+                  val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  all = packageManager.queryIntentActivities(i, 0)
+                      .filter { it.activityInfo.packageName != packageName }
+                      .map { App(it.loadLabel(packageManager).toString(), it.activityInfo.packageName, it.loadIcon(packageManager)) }
+                      .sortedBy { it.label.lowercase() }
+                  filter()
+              }
+
+              private fun filter() {
+                  val q = search.text.toString().trim().lowercase()
+                  shown.clear()
+                  shown.addAll(if (q.isEmpty()) all else all.filter { it.label.lowercase().contains(q) })
+                  adapter.notifyDataSetChanged()
+              }
+
+              override fun onResume() { super.onResume(); search.setText(""); load() }
+              override fun onBackPressed() { search.setText("") }   // stay on home
+          }
+          EOF
+          printf 'org.gradle.jvmargs=-Xmx2g\nandroid.useAndroidX=false\n' > JLauncher/gradle.properties
+      - name: Build debug APK
+        working-directory: JLauncher
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JLauncher-apk
+          path: JLauncher/app/build/outputs/apk/debug/app-debug.apk
