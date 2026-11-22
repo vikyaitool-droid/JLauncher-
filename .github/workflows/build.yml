@@ -6,6 +6,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -15,7 +16,7 @@ jobs:
           gradle-version: '8.7'
       - name: Create project
         run: |
-          mkdir -p JLauncher
+          mkdir -p JLauncher/app/src/main/java/com/vikranth/jlauncher
           cat > JLauncher/settings.gradle <<'EOF'
           pluginManagement {
               repositories { google(); mavenCentral(); gradlePluginPortal() }
@@ -26,14 +27,12 @@ jobs:
           rootProject.name = 'JLauncher'
           include ':app'
           EOF
-          mkdir -p JLauncher
           cat > JLauncher/build.gradle <<'EOF'
           plugins {
               id 'com.android.application' version '8.5.2' apply false
               id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
           }
           EOF
-          mkdir -p JLauncher/app
           cat > JLauncher/app/build.gradle <<'EOF'
           plugins {
               id 'com.android.application'
@@ -46,23 +45,32 @@ jobs:
                   applicationId 'com.vikranth.jlauncher'
                   minSdk 26
                   targetSdk 29
-                  versionCode 1
-                  versionName '1.0'
+                  versionCode Integer.parseInt(System.getenv('GITHUB_RUN_NUMBER') ?: '1')
+                  versionName '2.0'
+              }
+              signingConfigs {
+                  debug {
+                      storeFile file('debug.keystore')
+                      storePassword 'android'
+                      keyAlias 'androiddebugkey'
+                      keyPassword 'android'
+                  }
               }
               buildTypes { release { minifyEnabled false } }
               compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
               kotlinOptions { jvmTarget = '17' }
           }
           EOF
-          mkdir -p JLauncher/app/src/main
           cat > JLauncher/app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
               <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES"/>
+              <uses-permission android:name="android.permission.READ_CALENDAR"/>
               <application
                   android:label="JLauncher"
                   android:icon="@android:drawable/sym_def_app_icon"
+                  android:enableOnBackInvokedCallback="true"
                   android:theme="@android:style/Theme.Wallpaper.NoTitleBar">
                   <activity
                       android:name=".MainActivity"
@@ -70,7 +78,8 @@ jobs:
                       android:launchMode="singleTask"
                       android:stateNotNeeded="true"
                       android:excludeFromRecents="true"
-                      android:windowSoftInputMode="adjustPan">
+                      android:screenOrientation="portrait"
+                      android:windowSoftInputMode="stateHidden|adjustResize">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
                           <category android:name="android.intent.category.HOME"/>
@@ -81,126 +90,9 @@ jobs:
               </application>
           </manifest>
           EOF
-          mkdir -p JLauncher/app/src/main/java/com/vikranth/jlauncher
-          cat > JLauncher/app/src/main/java/com/vikranth/jlauncher/MainActivity.kt <<'EOF'
-          package com.vikranth.jlauncher
-
-          import android.app.Activity
-          import android.content.Intent
-          import android.content.pm.PackageManager
-          import android.graphics.Color
-          import android.graphics.drawable.Drawable
-          import android.net.Uri
-          import android.os.Bundle
-          import android.provider.Settings
-          import android.text.Editable
-          import android.text.TextWatcher
-          import android.view.Gravity
-          import android.view.View
-          import android.view.ViewGroup
-          import android.widget.*
-
-          class MainActivity : Activity() {
-
-              data class App(val label: String, val pkg: String, val icon: Drawable)
-
-              private var all = listOf<App>()
-              private val shown = mutableListOf<App>()
-              private lateinit var adapter: BaseAdapter
-              private lateinit var search: EditText
-
-              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-
-              override fun onCreate(b: Bundle?) {
-                  super.onCreate(b)
-                  val root = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      setPadding(dp(16), dp(40), dp(16), dp(8))
-                      setBackgroundColor(Color.argb(150, 0, 0, 0))
-                  }
-                  root.addView(TextClock(this).apply {
-                      format12Hour = "h:mm"; format24Hour = "HH:mm"
-                      textSize = 56f; setTextColor(Color.WHITE)
-                  })
-                  root.addView(TextClock(this).apply {
-                      format12Hour = "EEEE, d MMMM"; format24Hour = "EEEE, d MMMM"
-                      textSize = 16f; setTextColor(Color.LTGRAY)
-                  })
-                  search = EditText(this).apply {
-                      hint = "Search apps"; setHintTextColor(Color.GRAY)
-                      setTextColor(Color.WHITE); isSingleLine = true
-                      setBackgroundColor(Color.argb(60, 255, 255, 255))
-                      setPadding(dp(14), dp(10), dp(14), dp(10))
-                  }
-                  root.addView(search, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(20); bottomMargin = dp(12) })
-
-                  adapter = object : BaseAdapter() {
-                      override fun getCount() = shown.size
-                      override fun getItem(i: Int) = shown[i]
-                      override fun getItemId(i: Int) = i.toLong()
-                      override fun getView(i: Int, v: View?, p: ViewGroup?): View {
-                          val a = shown[i]
-                          val cell = LinearLayout(this@MainActivity).apply {
-                              orientation = LinearLayout.VERTICAL
-                              gravity = Gravity.CENTER_HORIZONTAL
-                              setPadding(0, dp(8), 0, dp(8))
-                          }
-                          cell.addView(ImageView(this@MainActivity).apply { setImageDrawable(a.icon) }, LinearLayout.LayoutParams(dp(48), dp(48)))
-                          cell.addView(TextView(this@MainActivity).apply {
-                              text = a.label; textSize = 11f; setTextColor(Color.WHITE)
-                              maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; gravity = Gravity.CENTER
-                          })
-                          return cell
-                      }
-                  }
-                  val grid = GridView(this).apply {
-                      numColumns = 4; adapter = this@MainActivity.adapter
-                      selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
-                      setOnItemClickListener { _, _, i, _ ->
-                          packageManager.getLaunchIntentForPackage(shown[i].pkg)?.let { startActivity(it) }
-                      }
-                      setOnItemLongClickListener { _, _, i, _ ->
-                          val pkg = shown[i].pkg
-                          android.app.AlertDialog.Builder(this@MainActivity)
-                              .setTitle(shown[i].label)
-                              .setItems(arrayOf("App info", "Uninstall")) { _, w ->
-                                  if (w == 0) startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$pkg")))
-                                  else startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:$pkg")))
-                              }.show()
-                          true
-                      }
-                  }
-                  root.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
-                  setContentView(root)
-
-                  search.addTextChangedListener(object : TextWatcher {
-                      override fun afterTextChanged(s: Editable?) = filter()
-                      override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                      override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-                  })
-              }
-
-              private fun load() {
-                  val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                  all = packageManager.queryIntentActivities(i, 0)
-                      .filter { it.activityInfo.packageName != packageName }
-                      .map { App(it.loadLabel(packageManager).toString(), it.activityInfo.packageName, it.loadIcon(packageManager)) }
-                      .sortedBy { it.label.lowercase() }
-                  filter()
-              }
-
-              private fun filter() {
-                  val q = search.text.toString().trim().lowercase()
-                  shown.clear()
-                  shown.addAll(if (q.isEmpty()) all else all.filter { it.label.lowercase().contains(q) })
-                  adapter.notifyDataSetChanged()
-              }
-
-              override fun onResume() { super.onResume(); search.setText(""); load() }
-              override fun onBackPressed() { search.setText("") }   // stay on home
-          }
-          EOF
           printf 'org.gradle.jvmargs=-Xmx2g\nandroid.useAndroidX=false\n' > JLauncher/gradle.properties
+          echo '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' | base64 -d > JLauncher/app/debug.keystore
+          cp .github/workflows/MainActivity.kt JLauncher/app/src/main/java/com/vikranth/jlauncher/MainActivity.kt
       - name: Build debug APK
         working-directory: JLauncher
         run: gradle assembleDebug --no-daemon
