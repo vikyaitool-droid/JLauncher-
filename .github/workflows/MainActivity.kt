@@ -167,8 +167,8 @@ class MainActivity : Activity() {
         root.fitsSystemWindows = true
 
         val main = LinearLayout(this)
-        main.orientation = LinearLayout.HORIZONTAL
-        main.setPadding(dp(12), dp(8), dp(4), dp(8))
+        main.orientation = LinearLayout.VERTICAL
+        main.setPadding(dp(12), dp(8), dp(12), dp(8))
         main.isFocusable = true
         main.isFocusableInTouchMode = true
 
@@ -195,7 +195,7 @@ class MainActivity : Activity() {
         greet.setPadding(dp(16), dp(14), dp(14), dp(14))
         greet.addView(greetCol, LinearLayout.LayoutParams(0, -2, 1f))
         greet.addView(clock)
-        left.addView(greet, LinearLayout.LayoutParams(-1, -2))
+        main.addView(greet, LinearLayout.LayoutParams(-1, -2))
 
         // event card
         eventBox = LinearLayout(this)
@@ -204,7 +204,7 @@ class MainActivity : Activity() {
         eventBox.setPadding(dp(16), dp(12), dp(16), dp(12))
         val evLp = LinearLayout.LayoutParams(-1, -2)
         evLp.topMargin = dp(10)
-        left.addView(eventBox, evLp)
+        main.addView(eventBox, evLp)
 
         // search
         search = EditText(this)
@@ -268,11 +268,17 @@ class MainActivity : Activity() {
         dockBox.background = bg(Color.argb(120, 16, 22, 30), 30)
         dockBox.setPadding(dp(6), dp(8), dp(6), dp(8))
         val dockWrap = LinearLayout(this)
-        dockWrap.gravity = Gravity.CENTER
+        dockWrap.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        dockWrap.setPadding(0, 0, 0, dp(16))
         dockWrap.addView(dockBox, LinearLayout.LayoutParams(-2, -2))
 
-        main.addView(left, LinearLayout.LayoutParams(0, -1, 1f))
-        main.addView(dockWrap, LinearLayout.LayoutParams(dp(64), -1))
+        val body = LinearLayout(this)
+        body.orientation = LinearLayout.HORIZONTAL
+        body.addView(left, LinearLayout.LayoutParams(0, -1, 1f))
+        val dwLp = LinearLayout.LayoutParams(dp(60), -1)
+        dwLp.leftMargin = dp(6)
+        body.addView(dockWrap, dwLp)
+        main.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
 
         // bottom sheet + scrim
         scrim = View(this)
@@ -481,8 +487,8 @@ class MainActivity : Activity() {
                 iv.setImageDrawable(a.icon)
                 iv.setOnClickListener { launch(a.pkg) }
                 iv.setOnLongClickListener { showSheet(a, true); true }
-                val lp = LinearLayout.LayoutParams(dp(44), dp(44))
-                lp.setMargins(0, dp(7), 0, dp(7))
+                val lp = LinearLayout.LayoutParams(dp(42), dp(42))
+                lp.setMargins(0, dp(5), 0, dp(5))
                 dockBox.addView(iv, lp)
             } else {
                 val slot = View(this)
@@ -491,7 +497,7 @@ class MainActivity : Activity() {
                 g.setColor(Color.argb(45, 255, 255, 255))
                 slot.background = g
                 val lp = LinearLayout.LayoutParams(dp(30), dp(30))
-                lp.setMargins(0, dp(14), 0, dp(14))
+                lp.setMargins(0, dp(11), 0, dp(11))
                 dockBox.addView(slot, lp)
             }
         }
