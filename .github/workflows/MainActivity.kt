@@ -36,13 +36,18 @@ import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
+import android.net.wifi.WifiManager
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.CalendarContract
 import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.provider.Settings
+import android.telephony.TelephonyManager
 import android.text.Editable
 import android.text.TextUtils
 import android.text.TextWatcher
@@ -54,6 +59,8 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
@@ -146,6 +153,8 @@ class MainActivity : Activity() {
     private lateinit var extraBox: LinearLayout
     private lateinit var dockBox: LinearLayout
     private lateinit var strip: LinearLayout
+    private lateinit var ring: StatusRing
+    private var mainBox: LinearLayout? = null
     private lateinit var scrim: View
     private lateinit var sheet: LinearLayout
     private var sheetGlass: Glass? = null
@@ -168,6 +177,13 @@ class MainActivity : Activity() {
             refreshEvents()
             fetchWeather(false)
             eventBox.postDelayed(this, 60000L)
+        }
+    }
+
+    private val netTick = object : Runnable {
+        override fun run() {
+            updateNet()
+            ring.postDelayed(this, 4000L)
         }
     }
 
@@ -583,6 +599,100 @@ class MainActivity : Activity() {
         }
     }
 
+    // ---------------------------------------------------------------- iPhone-fold style status ring
+
+    // ring = battery (open at the bottom), 4 dots = mobile signal, centre = Wi-Fi arcs or 4G/5G label
+    private inner class StatusRing : View(this@MainActivity) {
+        private var battery = 100
+        private var charging = false
+        private var cell = 0       // 0..4 mobile signal bars
+        private var wifi = 0       // 0 = not on Wi-Fi, 1..3 = Wi-Fi strength
+        private var online = true
+        private var label = ""
+        private var tint = Color.WHITE
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val box = RectF()
+
+        init {
+            p.strokeCap = Paint.Cap.ROUND
+            p.textAlign = Paint.Align.CENTER
+            p.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        }
+
+        fun set(battery: Int, charging: Boolean, cell: Int, wifi: Int, online: Boolean, label: String, tint: Int) {
+            if (this.battery == battery && this.charging == charging && this.cell == cell &&
+                this.wifi == wifi && this.online == online && this.label == label && this.tint == tint) return
+            this.battery = battery
+            this.charging = charging
+            this.cell = cell
+            this.wifi = wifi
+            this.online = online
+            this.label = label
+            this.tint = tint
+            invalidate()
+        }
+
+        override fun onDraw(c: Canvas) {
+            val s = minOf(width, height).toFloat()
+            val cx = width / 2f
+            val cy = height / 2f
+            val sw = s * 0.062f
+            val r = s / 2f - sw / 2f
+            val on = Color.WHITE
+            val off = Color.argb(85, 255, 255, 255)
+
+            // battery ring, open at the bottom (track + level)
+            p.style = Paint.Style.STROKE
+            p.strokeWidth = sw
+            box.set(cx - r, cy - r, cx + r, cy + r)
+            p.color = off
+            c.drawArc(box, 148f, 244f, false, p)
+            val sweep = 244f * battery.coerceIn(0, 100) / 100f
+            if (sweep > 1f) {
+                p.color = tint
+                c.drawArc(box, 148f, sweep, false, p)
+            }
+
+            // four dots along the opening = mobile signal
+            p.style = Paint.Style.FILL
+            val dr = s * 0.052f
+            for (i in 0 until 4) {
+                val a = Math.toRadians(123.0 - i * 22.0)
+                p.color = if (i < cell) on else off
+                c.drawCircle(cx + (r * 0.97f * Math.cos(a)).toFloat(), cy + (r * 0.97f * Math.sin(a)).toFloat(), dr, p)
+            }
+
+            // centre: data type on mobile data, otherwise Wi-Fi arcs
+            if (wifi == 0 && label.isNotEmpty()) {
+                p.color = on
+                p.textSize = s * (if (label.length > 2) 0.25f else 0.30f)
+                val fm = p.fontMetrics
+                c.drawText(label, cx, cy - (fm.ascent + fm.descent) / 2f, p)
+            } else {
+                val ay = cy + s * 0.135f
+                p.style = Paint.Style.STROKE
+                p.strokeWidth = s * 0.042f
+                val rad = floatArrayOf(s * 0.29f, s * 0.195f)
+                for (k in 0..1) {
+                    p.color = if (wifi >= 3 - k) on else off
+                    box.set(cx - rad[k], ay - rad[k], cx + rad[k], ay + rad[k])
+                    c.drawArc(box, 226f, 88f, false, p)
+                }
+                p.style = Paint.Style.FILL
+                p.color = if (wifi >= 1) on else off
+                val w = s * 0.085f
+                box.set(cx - w, ay - w, cx + w, ay + w)
+                c.drawArc(box, 226f, 88f, true, p)
+                if (!online) {
+                    p.style = Paint.Style.STROKE
+                    p.strokeWidth = s * 0.05f
+                    p.color = on
+                    c.drawLine(cx - s * 0.2f, cy - s * 0.17f, cx + s * 0.2f, cy + s * 0.22f, p)
+                }
+            }
+        }
+    }
+
     private inner class MaxScroll(private val maxH: Int) : ScrollView(this@MainActivity) {
         override fun onMeasure(w: Int, h: Int) {
             super.onMeasure(w, MeasureSpec.makeMeasureSpec(maxH, MeasureSpec.AT_MOST))
@@ -631,11 +741,20 @@ class MainActivity : Activity() {
         loadApps()
         eventBox.removeCallbacks(tick)
         eventBox.post(tick)
+        ring.removeCallbacks(netTick)
+        ring.post(netTick)
+        applyBars()
     }
 
     override fun onPause() {
         super.onPause()
         eventBox.removeCallbacks(tick)
+        ring.removeCallbacks(netTick)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) applyBars()
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -779,7 +898,16 @@ class MainActivity : Activity() {
             if (e.actionMasked == MotionEvent.ACTION_UP) v.performClick()
             headDetector.onTouchEvent(e)
         }
-        main.addView(head, LinearLayout.LayoutParams(-1, -2))
+        // status ring (iPhone fold style) floats at the top-right of the header
+        ring = StatusRing()
+        val headWrap = FrameLayout(this)
+        headWrap.addView(head, FrameLayout.LayoutParams(-1, -2))
+        val ringLp = FrameLayout.LayoutParams(dp(38), dp(38), Gravity.TOP or Gravity.END)
+        ringLp.topMargin = dp(2)
+        ringLp.rightMargin = dp(2)
+        headWrap.addView(ring, ringLp)
+        main.addView(headWrap, LinearLayout.LayoutParams(-1, -2))
+        mainBox = main
 
         // ---- today's events card
         eventBox = LinearLayout(this)
@@ -969,6 +1097,7 @@ class MainActivity : Activity() {
         shLp.setMargins(dp(8), 0, dp(8), dp(8))
         root.addView(sheet, shLp)
         setContentView(root)
+        root.viewTreeObserver.addOnGlobalLayoutListener { fitTop() }
         main.requestFocus()
     }
 
@@ -991,6 +1120,9 @@ class MainActivity : Activity() {
         refreshEvents()
         applyBackground()
         invalidateGlass()
+        ring.visibility = if (pBool("ring", true)) View.VISIBLE else View.GONE
+        applyBars()
+        updateNet()
     }
 
     // dim always works; blur needs Android 12+ and blur effects enabled in the system
@@ -999,6 +1131,108 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 31) {
             window.setBackgroundBlurRadius(dp(pInt("blur", 40) * 6 / 10))
         }
+    }
+
+    // ---------------------------------------------------------------- status ring data + system status bar
+
+    private fun updateNet() {
+        if (!::ring.isInitialized || ring.visibility != View.VISIBLE) return
+        var online = false
+        var wifiOn = false
+        var cellOn = false
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+            if (caps != null) {
+                online = true
+                wifiOn = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                cellOn = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+            }
+        } catch (e: Exception) { }
+        var wl = 0
+        if (wifiOn) {
+            wl = 1
+            try {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                @Suppress("DEPRECATION")
+                val rssi = wm.connectionInfo.rssi
+                wl = if (rssi >= -60) 3 else if (rssi >= -72) 2 else 1
+            } catch (e: Exception) { }
+        }
+        var level = 0
+        var label = ""
+        try {
+            val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            level = if (Build.VERSION.SDK_INT >= 28) (tm.signalStrength?.level ?: 0) else if (cellOn) 3 else 0
+            if (cellOn && !wifiOn) label = netLabel(tm)
+        } catch (e: Exception) { }
+        var pct = 100
+        var chg = false
+        try {
+            val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+            val v = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            if (v in 0..100) pct = v
+            chg = bm.isCharging
+        } catch (e: Exception) { }
+        val tint = if (chg) accent() else if (pct <= 15) Color.rgb(255, 110, 100) else Color.WHITE
+        ring.set(pct, chg, level.coerceIn(0, 4), wl, online, label, tint)
+    }
+
+    // needs Android 13+ (READ_BASIC_PHONE_STATE) or the Phone permission on older versions
+    private fun netLabel(tm: TelephonyManager): String {
+        return try {
+            when (tm.dataNetworkType) {
+                20 -> "5G"
+                19 -> "4G+"
+                13 -> "4G"
+                3, 5, 6, 8, 9, 10, 12, 14, 15, 17 -> "3G"
+                1, 2, 4, 7, 11, 16 -> "2G"
+                else -> ""
+            }
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    // hide the system status bar (the ring replaces it) and keep content clear of a camera cut-out
+    @Suppress("DEPRECATION")
+    private fun applyBars() {
+        val hide = pBool("hidebar", true)
+        if (Build.VERSION.SDK_INT >= 28) {
+            val lp = window.attributes
+            val mode = if (hide) WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES else WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+            if (lp.layoutInDisplayCutoutMode != mode) {
+                lp.layoutInDisplayCutoutMode = mode
+                window.attributes = lp
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            val c = window.insetsController
+            if (c != null) {
+                if (hide) {
+                    c.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    c.hide(WindowInsets.Type.statusBars())
+                } else {
+                    c.show(WindowInsets.Type.statusBars())
+                }
+            }
+        } else {
+            val flags = View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            val d = window.decorView
+            d.systemUiVisibility = if (hide) d.systemUiVisibility or flags else d.systemUiVisibility and flags.inv()
+        }
+        fitTop()
+    }
+
+    private fun fitTop() {
+        val m = mainBox ?: return
+        var cut = 0
+        if (Build.VERSION.SDK_INT >= 28) cut = m.rootWindowInsets?.displayCutout?.safeInsetTop ?: 0
+        val loc = IntArray(2)
+        m.getLocationOnScreen(loc)
+        val need = if (pBool("hidebar", true)) maxOf(cut, dp(26)) else 0
+        val extra = maxOf(0, need - loc[1])
+        m.setPadding(dp(12), dp(2) + extra, dp(12), dp(8))
     }
 
     private fun showSettings() {
@@ -1068,6 +1302,8 @@ class MainActivity : Activity() {
 
         body.addView(toggle("iOS-style icons", "ios", true) { loadApps() }, LinearLayout.LayoutParams(-1, -2))
         body.addView(toggle("Show today's events", "events", true) { applySettings() }, LinearLayout.LayoutParams(-1, -2))
+        body.addView(toggle("Status ring (iPhone fold style)", "ring", true) { applySettings() }, LinearLayout.LayoutParams(-1, -2))
+        body.addView(toggle("Hide system status bar", "hidebar", true) { applySettings() }, LinearLayout.LayoutParams(-1, -2))
         body.addView(toggle("Show app names", "labels", true) { applySettings() }, LinearLayout.LayoutParams(-1, -2))
         body.addView(toggle("Search contacts", "contacts", false) {
             if (pBool("contacts", false) &&
@@ -1085,7 +1321,7 @@ class MainActivity : Activity() {
         reset.setOnClickListener {
             prefs.edit().remove("name").remove("blur").remove("dim").remove("cols")
                 .remove("icon").remove("events").remove("labels").remove("accent")
-                .remove("wx").remove("city").remove("ios").remove("contacts").apply()
+                .remove("wx").remove("city").remove("ios").remove("contacts").remove("ring").remove("hidebar").apply()
             cityDirty = true
             applySettings()
             loadApps()
