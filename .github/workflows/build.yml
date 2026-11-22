@@ -44,7 +44,7 @@ jobs:
               defaultConfig {
                   applicationId 'com.vikranth.jlauncher'
                   minSdk 26
-                  targetSdk 29
+                  targetSdk 34
                   versionCode Integer.parseInt(System.getenv('GITHUB_RUN_NUMBER') ?: '1')
                   versionName '2.0'
               }
