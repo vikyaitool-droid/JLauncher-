@@ -9,6 +9,7 @@ import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -33,6 +34,9 @@ import android.widget.FrameLayout
 import android.widget.GridView
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.Switch
 import android.widget.TextClock
 import android.widget.TextView
 import android.widget.Toast
@@ -47,7 +51,7 @@ import java.util.TimeZone
 class MainActivity : Activity() {
 
     companion object {
-        const val NAME = "Dr. Vikranth"   // greeting name - edit here
+        const val NAME = "Dr. Vikranth"   // default greeting name (change in launcher settings)
         const val MAX_DOCK = 6
         const val REQ_CAL = 7
     }
@@ -65,6 +69,7 @@ class MainActivity : Activity() {
     private lateinit var grid: GridView
     private lateinit var search: EditText
     private lateinit var greetHello: TextView
+    private lateinit var greetName: TextView
     private lateinit var greetDate: TextView
     private lateinit var eventBox: LinearLayout
     private lateinit var dockBox: LinearLayout
@@ -81,6 +86,9 @@ class MainActivity : Activity() {
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun pInt(k: String, d: Int) = prefs.getInt(k, d)
+    private fun pBool(k: String, d: Boolean) = prefs.getBoolean(k, d)
 
     private fun bg(c: Int, radius: Int): GradientDrawable {
         val g = GradientDrawable()
@@ -106,6 +114,7 @@ class MainActivity : Activity() {
         window.statusBarColor = Color.TRANSPARENT
         initDock()
         buildUi()
+        applySettings()
         if (Build.VERSION.SDK_INT >= 33) {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(
                 OnBackInvokedDispatcher.PRIORITY_DEFAULT,
@@ -156,8 +165,8 @@ class MainActivity : Activity() {
 
     private fun hideKeyboard() {
         val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        imm.hideSoftInputFromWindow(search.windowToken, 0)
-        search.clearFocus()
+        imm.hideSoftInputFromWindow(window.decorView.windowToken, 0)
+        currentFocus?.clearFocus()
     }
 
     // ---------------------------------------------------------------- UI
@@ -172,13 +181,10 @@ class MainActivity : Activity() {
         main.isFocusable = true
         main.isFocusableInTouchMode = true
 
-        val left = LinearLayout(this)
-        left.orientation = LinearLayout.VERTICAL
-
-        // greeting card
+        // greeting card (long-press = settings)
         greetHello = tv("", 13f, Color.argb(200, 255, 255, 255))
         greetDate = tv("", 12f, Color.argb(170, 255, 255, 255))
-        val greetName = tv(NAME, 19f, Color.WHITE, true)
+        greetName = tv(NAME, 19f, Color.WHITE, true)
         val greetCol = LinearLayout(this)
         greetCol.orientation = LinearLayout.VERTICAL
         greetCol.addView(greetHello)
@@ -195,9 +201,10 @@ class MainActivity : Activity() {
         greet.setPadding(dp(16), dp(14), dp(14), dp(14))
         greet.addView(greetCol, LinearLayout.LayoutParams(0, -2, 1f))
         greet.addView(clock)
+        greet.setOnLongClickListener { showSettings(); true }
         main.addView(greet, LinearLayout.LayoutParams(-1, -2))
 
-        // event card
+        // today's events card
         eventBox = LinearLayout(this)
         eventBox.orientation = LinearLayout.VERTICAL
         eventBox.background = bg(Color.argb(150, 16, 22, 30), 22)
@@ -206,7 +213,7 @@ class MainActivity : Activity() {
         evLp.topMargin = dp(10)
         main.addView(eventBox, evLp)
 
-        // search
+        // full-width search row + settings button
         search = EditText(this)
         search.hint = "Search apps"
         search.setHintTextColor(Color.argb(160, 255, 255, 255))
@@ -222,9 +229,21 @@ class MainActivity : Activity() {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
         })
-        val sLp = LinearLayout.LayoutParams(-1, dp(42))
-        sLp.topMargin = dp(10)
-        left.addView(search, sLp)
+        val gear = ImageView(this)
+        gear.setImageResource(android.R.drawable.ic_menu_preferences)
+        gear.setColorFilter(Color.WHITE)
+        gear.setPadding(dp(10), dp(10), dp(10), dp(10))
+        gear.background = bg(Color.argb(70, 255, 255, 255), 22)
+        gear.setOnClickListener { showSettings() }
+        val searchRow = LinearLayout(this)
+        searchRow.orientation = LinearLayout.HORIZONTAL
+        searchRow.addView(search, LinearLayout.LayoutParams(0, dp(44), 1f))
+        val gearLp = LinearLayout.LayoutParams(dp(44), dp(44))
+        gearLp.leftMargin = dp(8)
+        searchRow.addView(gear, gearLp)
+        val srLp = LinearLayout.LayoutParams(-1, -2)
+        srLp.topMargin = dp(10)
+        main.addView(searchRow, srLp)
 
         // app grid
         adapter = object : BaseAdapter() {
@@ -233,20 +252,24 @@ class MainActivity : Activity() {
             override fun getItemId(i: Int) = i.toLong()
             override fun getView(i: Int, v: View?, p: ViewGroup?): View {
                 val a = shown[i]
+                val sizes = intArrayOf(40, 46, 54)
+                val sz = sizes[pInt("icon", 1).coerceIn(0, 2)]
                 val cell = LinearLayout(this@MainActivity)
                 cell.orientation = LinearLayout.VERTICAL
                 cell.gravity = Gravity.CENTER_HORIZONTAL
                 cell.setPadding(0, dp(8), 0, dp(8))
                 val icon = ImageView(this@MainActivity)
                 icon.setImageDrawable(a.icon)
-                cell.addView(icon, LinearLayout.LayoutParams(dp(46), dp(46)))
-                val label = tv(a.label, 11f, Color.WHITE)
-                label.maxLines = 1
-                label.ellipsize = TextUtils.TruncateAt.END
-                label.gravity = Gravity.CENTER
-                label.setShadowLayer(4f, 0f, 1f, Color.BLACK)
-                label.setPadding(dp(2), dp(4), dp(2), 0)
-                cell.addView(label, LinearLayout.LayoutParams(-1, -2))
+                cell.addView(icon, LinearLayout.LayoutParams(dp(sz), dp(sz)))
+                if (pBool("labels", true)) {
+                    val label = tv(a.label, 11f, Color.WHITE)
+                    label.maxLines = 1
+                    label.ellipsize = TextUtils.TruncateAt.END
+                    label.gravity = Gravity.CENTER
+                    label.setShadowLayer(4f, 0f, 1f, Color.BLACK)
+                    label.setPadding(dp(2), dp(4), dp(2), 0)
+                    cell.addView(label, LinearLayout.LayoutParams(-1, -2))
+                }
                 return cell
             }
         }
@@ -257,11 +280,8 @@ class MainActivity : Activity() {
         grid.isVerticalScrollBarEnabled = false
         grid.setOnItemClickListener { _, _, i, _ -> launch(shown[i].pkg) }
         grid.setOnItemLongClickListener { _, _, i, _ -> showSheet(shown[i], false); true }
-        val gLp = LinearLayout.LayoutParams(-1, 0, 1f)
-        gLp.topMargin = dp(6)
-        left.addView(grid, gLp)
 
-        // right fixed dock
+        // right fixed dock, sits low
         dockBox = LinearLayout(this)
         dockBox.orientation = LinearLayout.VERTICAL
         dockBox.gravity = Gravity.CENTER_HORIZONTAL
@@ -274,11 +294,13 @@ class MainActivity : Activity() {
 
         val body = LinearLayout(this)
         body.orientation = LinearLayout.HORIZONTAL
-        body.addView(left, LinearLayout.LayoutParams(0, -1, 1f))
+        body.addView(grid, LinearLayout.LayoutParams(0, -1, 1f))
         val dwLp = LinearLayout.LayoutParams(dp(60), -1)
         dwLp.leftMargin = dp(6)
         body.addView(dockWrap, dwLp)
-        main.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
+        val bodyLp = LinearLayout.LayoutParams(-1, 0, 1f)
+        bodyLp.topMargin = dp(6)
+        main.addView(body, bodyLp)
 
         // bottom sheet + scrim
         scrim = View(this)
@@ -292,7 +314,7 @@ class MainActivity : Activity() {
         sheet.visibility = View.GONE
         val r = dp(24).toFloat()
         val sbg = GradientDrawable()
-        sbg.setColor(Color.argb(248, 28, 32, 40))
+        sbg.setColor(Color.argb(250, 28, 32, 40))
         sbg.cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
         sheet.background = sbg
 
@@ -303,7 +325,152 @@ class MainActivity : Activity() {
         main.requestFocus()
     }
 
-    // ---------------------------------------------------------------- greeting + events
+    // ---------------------------------------------------------------- settings
+
+    private fun applySettings() {
+        val n = prefs.getString("name", NAME)
+        greetName.text = if (n == null) NAME else n
+        grid.numColumns = pInt("cols", 4).coerceIn(3, 5)
+        adapter.notifyDataSetChanged()
+        eventBox.visibility = if (pBool("events", true)) View.VISIBLE else View.GONE
+        applyBackground()
+    }
+
+    // dim always works; blur needs Android 12+ and blur effects enabled in the system
+    private fun applyBackground() {
+        val dim = pInt("dim", 35)
+        window.setBackgroundDrawable(ColorDrawable(Color.argb(dim * 255 / 100, 0, 0, 0)))
+        if (Build.VERSION.SDK_INT >= 31) {
+            window.setBackgroundBlurRadius(dp(pInt("blur", 40) * 6 / 10))
+        }
+    }
+
+    private fun showSettings() {
+        sheet.removeAllViews()
+        val header = sheetHeader("Launcher settings", null)
+        sheet.addView(header, LinearLayout.LayoutParams(-1, -2))
+
+        val sv = ScrollView(this)
+        val body = LinearLayout(this)
+        body.orientation = LinearLayout.VERTICAL
+        body.setPadding(dp(24), dp(4), dp(24), dp(24))
+        sv.addView(body, ViewGroup.LayoutParams(-1, -2))
+        sheet.addView(sv, LinearLayout.LayoutParams(-1, -2))
+
+        body.addView(settingLabel("Your name"))
+        val nameIn = EditText(this)
+        val cur = prefs.getString("name", NAME)
+        nameIn.setText(if (cur == null) NAME else cur)
+        nameIn.setTextColor(Color.WHITE)
+        nameIn.textSize = 15f
+        nameIn.isSingleLine = true
+        nameIn.background = bg(Color.argb(60, 255, 255, 255), 12)
+        nameIn.setPadding(dp(14), dp(10), dp(14), dp(10))
+        nameIn.addTextChangedListener(object : TextWatcher {
+            override fun afterTextChanged(s: Editable?) {
+                prefs.edit().putString("name", s.toString()).apply()
+                greetName.text = s.toString()
+            }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        body.addView(nameIn, LinearLayout.LayoutParams(-1, -2))
+
+        body.addView(settingLabel("Background blur (Android 12 and up)"))
+        body.addView(seek("blur", 40, 100) { applyBackground() }, LinearLayout.LayoutParams(-1, -2))
+
+        body.addView(settingLabel("Background dim"))
+        body.addView(seek("dim", 35, 80) { applyBackground() }, LinearLayout.LayoutParams(-1, -2))
+
+        body.addView(settingLabel("App columns"))
+        body.addView(segmented("cols", 4, listOf("3", "4", "5"), 3) { applySettings() }, LinearLayout.LayoutParams(-1, -2))
+
+        body.addView(settingLabel("Icon size"))
+        body.addView(segmented("icon", 1, listOf("Small", "Medium", "Large"), 0) { applySettings() }, LinearLayout.LayoutParams(-1, -2))
+
+        body.addView(toggle("Show today's events", "events", true) { applySettings() }, LinearLayout.LayoutParams(-1, -2))
+        body.addView(toggle("Show app names", "labels", true) { applySettings() }, LinearLayout.LayoutParams(-1, -2))
+
+        val reset = tv("Reset settings", 15f, Color.rgb(255, 138, 128))
+        reset.setPadding(0, dp(18), 0, dp(6))
+        reset.setOnClickListener {
+            prefs.edit().remove("name").remove("blur").remove("dim").remove("cols")
+                .remove("icon").remove("events").remove("labels").apply()
+            applySettings()
+            hideSheet()
+        }
+        body.addView(reset, LinearLayout.LayoutParams(-1, -2))
+
+        openSheet()
+    }
+
+    private fun settingLabel(text: String): TextView {
+        val t = tv(text, 13f, Color.argb(190, 255, 255, 255))
+        t.setPadding(0, dp(16), 0, dp(6))
+        return t
+    }
+
+    private fun seek(key: String, def: Int, max: Int, onChange: () -> Unit): SeekBar {
+        val sb = SeekBar(this)
+        sb.max = max
+        sb.progress = pInt(key, def)
+        sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    prefs.edit().putInt(key, p).apply()
+                    onChange()
+                }
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        return sb
+    }
+
+    private fun segmented(key: String, def: Int, labels: List<String>, base: Int, onChange: () -> Unit): LinearLayout {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        val cells = ArrayList<TextView>()
+        fun paint() {
+            val curVal = pInt(key, def)
+            for (i in cells.indices) {
+                val on = (i + base) == curVal
+                cells[i].background = bg(if (on) Color.rgb(66, 133, 244) else Color.argb(50, 255, 255, 255), 12)
+            }
+        }
+        for (i in labels.indices) {
+            val c = tv(labels[i], 14f, Color.WHITE)
+            c.gravity = Gravity.CENTER
+            c.setOnClickListener {
+                prefs.edit().putInt(key, i + base).apply()
+                paint()
+                onChange()
+            }
+            val lp = LinearLayout.LayoutParams(0, dp(40), 1f)
+            lp.rightMargin = if (i < labels.size - 1) dp(8) else 0
+            row.addView(c, lp)
+            cells.add(c)
+        }
+        paint()
+        return row
+    }
+
+    private fun toggle(title: String, key: String, def: Boolean, onChange: () -> Unit): LinearLayout {
+        val row = LinearLayout(this)
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(0, dp(14), 0, dp(2))
+        row.addView(tv(title, 15f, Color.WHITE), LinearLayout.LayoutParams(0, -2, 1f))
+        val sw = Switch(this)
+        sw.isChecked = pBool(key, def)
+        sw.setOnCheckedChangeListener { _, on ->
+            prefs.edit().putBoolean(key, on).apply()
+            onChange()
+        }
+        row.addView(sw)
+        return row
+    }
+
+    // ---------------------------------------------------------------- greeting + today's events
 
     private fun updateGreeting() {
         val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
@@ -316,7 +483,7 @@ class MainActivity : Activity() {
 
     private fun refreshEvents() {
         eventBox.removeAllViews()
-        eventBox.addView(tv("Up next", 12f, Color.rgb(150, 200, 255), true))
+        eventBox.addView(tv("Today", 12f, Color.rgb(150, 200, 255), true))
         if (!hasCal()) {
             val t = tv("Tap to show your calendar events", 14f, Color.WHITE)
             t.setPadding(0, dp(6), 0, 0)
@@ -327,7 +494,7 @@ class MainActivity : Activity() {
         eventBox.setOnClickListener { openCalendar() }
         val list = try { queryEvents() } catch (e: Exception) { emptyList<Ev>() }
         if (list.isEmpty()) {
-            val t = tv("No events in the next 7 days", 14f, Color.WHITE)
+            val t = tv("Nothing scheduled today", 14f, Color.WHITE)
             t.setPadding(0, dp(6), 0, 0)
             eventBox.addView(t)
             return
@@ -343,11 +510,22 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun dateKey(c: Calendar) =
+        c.get(Calendar.YEAR) * 10000 + c.get(Calendar.MONTH) * 100 + c.get(Calendar.DAY_OF_MONTH)
+
+    // only events that fall on today (local day), still running or yet to start
     private fun queryEvents(): List<Ev> {
         val now = System.currentTimeMillis()
+        val endDay = Calendar.getInstance()
+        endDay.set(Calendar.HOUR_OF_DAY, 23)
+        endDay.set(Calendar.MINUTE, 59)
+        endDay.set(Calendar.SECOND, 59)
+        endDay.set(Calendar.MILLISECOND, 999)
+        val todayKey = dateKey(Calendar.getInstance())
+
         val builder = CalendarContract.Instances.CONTENT_URI.buildUpon()
         ContentUris.appendId(builder, now)
-        ContentUris.appendId(builder, now + 7L * 24 * 3600 * 1000)
+        ContentUris.appendId(builder, endDay.timeInMillis)
         val proj = arrayOf(
             CalendarContract.Instances.TITLE,
             CalendarContract.Instances.BEGIN,
@@ -358,14 +536,23 @@ class MainActivity : Activity() {
         val c = contentResolver.query(builder.build(), proj, null, null, CalendarContract.Instances.BEGIN + " ASC")
         if (c != null) {
             try {
-                while (c.moveToNext() && out.size < 3) {
+                while (c.moveToNext() && out.size < 4) {
                     val t = c.getString(0)
                     val title = if (t == null || t.isBlank()) "(No title)" else t
                     val begin = c.getLong(1)
                     val end = c.getLong(2)
                     val allDay = c.getInt(3) == 1
-                    if (end < now) continue
-                    out.add(Ev(title, whenText(begin, allDay, now)))
+                    if (allDay) {
+                        // all-day events are stored in UTC dates
+                        val cb = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
+                        cb.timeInMillis = begin
+                        val ce = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
+                        ce.timeInMillis = end - 1
+                        if (todayKey < dateKey(cb) || todayKey > dateKey(ce)) continue
+                    } else if (end < now) {
+                        continue
+                    }
+                    out.add(Ev(title, whenText(begin, end, allDay, now)))
                 }
             } finally {
                 c.close()
@@ -374,29 +561,11 @@ class MainActivity : Activity() {
         return out
     }
 
-    private fun sameDay(a: Calendar, b: Calendar) =
-        a.get(Calendar.YEAR) == b.get(Calendar.YEAR) && a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)
-
-    private fun whenText(begin: Long, allDay: Boolean, now: Long): String {
-        if (!allDay && begin <= now) return "Now"
-        val tz = if (allDay) TimeZone.getTimeZone("UTC") else TimeZone.getDefault()
-        val c = Calendar.getInstance(tz)
-        c.timeInMillis = begin
-        val today = Calendar.getInstance()
-        val tomorrow = Calendar.getInstance()
-        tomorrow.add(Calendar.DAY_OF_YEAR, 1)
-        val day: String
-        if (sameDay(c, today) || begin < now) {
-            day = "Today"
-        } else if (sameDay(c, tomorrow)) {
-            day = "Tomorrow"
-        } else {
-            val f = SimpleDateFormat("EEE d MMM", Locale.getDefault())
-            f.timeZone = tz
-            day = f.format(c.time)
-        }
-        if (allDay) return day + " · All day"
-        return day + " · " + SimpleDateFormat("h:mm a", Locale.getDefault()).format(c.time)
+    private fun whenText(begin: Long, end: Long, allDay: Boolean, now: Long): String {
+        if (allDay) return "All day"
+        val f = SimpleDateFormat("h:mm a", Locale.getDefault())
+        if (begin <= now) return "Now · until " + f.format(Date(end))
+        return f.format(Date(begin)) + " – " + f.format(Date(end))
     }
 
     private fun openCalendar() {
@@ -505,9 +674,7 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- bottom sheet
 
-    private fun showSheet(app: App, inDock: Boolean) {
-        sheet.removeAllViews()
-
+    private fun sheetHeader(title: String, appIcon: Drawable?): LinearLayout {
         val header = LinearLayout(this)
         header.orientation = LinearLayout.VERTICAL
         header.gravity = Gravity.CENTER_HORIZONTAL
@@ -517,16 +684,23 @@ class MainActivity : Activity() {
         header.addView(handle, LinearLayout.LayoutParams(dp(36), dp(4)))
         val row = LinearLayout(this)
         row.gravity = Gravity.CENTER_VERTICAL
-        row.setPadding(dp(20), dp(14), dp(20), dp(8))
-        val icon = ImageView(this)
-        icon.setImageDrawable(app.icon)
-        row.addView(icon, LinearLayout.LayoutParams(dp(40), dp(40)))
-        val name = tv(app.label, 16f, Color.WHITE, true)
-        name.setPadding(dp(14), 0, 0, 0)
+        row.setPadding(dp(24), dp(14), dp(24), dp(8))
+        if (appIcon != null) {
+            val icon = ImageView(this)
+            icon.setImageDrawable(appIcon)
+            row.addView(icon, LinearLayout.LayoutParams(dp(40), dp(40)))
+        }
+        val name = tv(title, 16f, Color.WHITE, true)
+        if (appIcon != null) name.setPadding(dp(14), 0, 0, 0)
         row.addView(name)
         header.addView(row, LinearLayout.LayoutParams(-1, -2))
         attachDrag(header)
-        sheet.addView(header, LinearLayout.LayoutParams(-1, -2))
+        return header
+    }
+
+    private fun showSheet(app: App, inDock: Boolean) {
+        sheet.removeAllViews()
+        sheet.addView(sheetHeader(app.label, app.icon), LinearLayout.LayoutParams(-1, -2))
 
         val acts = ArrayList<Act>()
         if (inDock || dock.contains(app.pkg)) {
@@ -548,7 +722,10 @@ class MainActivity : Activity() {
             sheet.addView(t, LinearLayout.LayoutParams(-1, dp(52)))
         }
         sheet.addView(View(this), LinearLayout.LayoutParams(-1, dp(14)))
+        openSheet()
+    }
 
+    private fun openSheet() {
         sheetOpen = true
         sheet.animate().cancel()
         scrim.animate().cancel()
@@ -569,6 +746,7 @@ class MainActivity : Activity() {
     private fun hideSheet() {
         if (!sheetOpen) return
         sheetOpen = false
+        hideKeyboard()
         scrim.animate().alpha(0f).setDuration(180).start()
         sheet.animate().translationY(sheet.height.toFloat()).setDuration(180).withEndAction {
             sheet.visibility = View.GONE
