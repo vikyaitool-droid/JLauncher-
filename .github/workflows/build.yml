@@ -46,7 +46,7 @@ jobs:
                   minSdk 26
                   targetSdk 34
                   versionCode Integer.parseInt(System.getenv('GITHUB_RUN_NUMBER') ?: '1')
-                  versionName '3.0'
+                  versionName '4.0'
               }
               signingConfigs {
                   debug {
@@ -95,6 +95,15 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER"/>
                       </intent-filter>
                   </activity>
+                  <service
+                      android:name=".NotifService"
+                      android:exported="true"
+                      android:label="JLauncher badges"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService"/>
+                      </intent-filter>
+                  </service>
               </application>
           </manifest>
           EOF

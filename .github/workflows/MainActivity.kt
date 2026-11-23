@@ -1,6 +1,15 @@
 package com.vikranth.jlauncher
 
 import android.Manifest
+import android.app.Notification
+import android.appwidget.AppWidgetHost
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProviderInfo
+import android.service.notification.NotificationListenerService
+import android.service.notification.StatusBarNotification
+import android.view.ViewOutlineProvider
+import android.graphics.Outline
+import org.json.JSONArray
 import android.animation.AnimatorSet
 import android.animation.ObjectAnimator
 import android.animation.StateListAnimator
@@ -121,12 +130,20 @@ class MainActivity : Activity() {
         const val G_CALC = 6
         const val G_PERSON = 7
         const val G_WEB = 8
+        const val G_FOLDER = 9
+        const val G_EDIT = 10
+        const val G_WIDGET = 11
+        const val G_PLUS = 12
+        const val REQ_BIND = 22
+        const val REQ_CONFIG = 23
+        const val HOST_ID = 1024
     }
 
     data class App(val label: String, val pkg: String)
     data class Ev(val title: String, val whenText: String)
+    data class Folder(val id: String, var name: String, val pkgs: MutableList<String>)
     data class Act(val label: String, val glyph: Int, val danger: Boolean, val go: () -> Unit)
-    private class Holder(val icon: ImageView, val label: TextView)
+    private class Holder(val icon: ImageView, val label: TextView, val badge: TextView)
 
     private var everything = listOf<App>()   // every launchable app
     private var all = listOf<App>()          // visible (not hidden) apps
@@ -137,6 +154,16 @@ class MainActivity : Activity() {
     private val rawCache = HashMap<String, Drawable>()
     private var styling = false
     private val blank: Drawable = ColorDrawable(Color.TRANSPARENT)
+    private var gridApps = listOf<App>()
+    private val folders = mutableListOf<Folder>()
+    private val folderCache = HashMap<String, Drawable>()
+    private lateinit var awm: AppWidgetManager
+    private lateinit var awHost: AppWidgetHost
+    private lateinit var widgetPanel: FrameLayout
+    private lateinit var widgetList: LinearLayout
+    private lateinit var recentBox: LinearLayout
+    private var widgetsOpen = false
+    private var pendingWidgetId = -1
 
     private lateinit var prefs: SharedPreferences
     private lateinit var adapter: BaseAdapter
@@ -481,6 +508,7 @@ class MainActivity : Activity() {
     }
 
     private fun iconOf(a: App): Drawable {
+        if (isFolder(a.pkg)) return folderIcon(a.pkg)
         if (pBool("ios", true)) {
             return styled[a.pkg] ?: blank
         }
@@ -510,6 +538,7 @@ class MainActivity : Activity() {
             }
             runOnUiThread {
                 styled.putAll(out)
+                folderCache.clear()
                 styling = false
                 adapter.notifyDataSetChanged()
                 refreshDock()
@@ -588,6 +617,29 @@ class MainActivity : Activity() {
                     val a = Path()
                     a.moveTo(4f, 20f); a.quadTo(12f, 9f, 20f, 20f)
                     c.drawPath(a, p)
+                }
+                G_FOLDER -> {
+                    val a = Path()
+                    a.moveTo(3f, 7f); a.lineTo(9f, 7f); a.lineTo(11f, 9f); a.lineTo(21f, 9f)
+                    a.lineTo(21f, 19f); a.lineTo(3f, 19f); a.close()
+                    c.drawPath(a, p)
+                }
+                G_EDIT -> {
+                    c.drawLine(4f, 20f, 8f, 19f, p)
+                    c.drawLine(4f, 20f, 5f, 16f, p)
+                    c.drawLine(5f, 16f, 16f, 5f, p)
+                    c.drawLine(8f, 19f, 19f, 8f, p)
+                    c.drawLine(16f, 5f, 19f, 8f, p)
+                }
+                G_WIDGET -> {
+                    c.drawRect(4f, 4f, 11f, 11f, p)
+                    c.drawRect(13f, 4f, 20f, 11f, p)
+                    c.drawRect(4f, 13f, 11f, 20f, p)
+                    c.drawRect(13f, 13f, 20f, 20f, p)
+                }
+                G_PLUS -> {
+                    c.drawLine(12f, 5f, 12f, 19f, p)
+                    c.drawLine(5f, 12f, 19f, 12f, p)
                 }
                 else -> {
                     c.drawCircle(12f, 12f, 9f, p)
@@ -704,6 +756,9 @@ class MainActivity : Activity() {
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         prefs = getSharedPreferences("jl", MODE_PRIVATE)
+        awm = AppWidgetManager.getInstance(this)
+        awHost = AppWidgetHost(this, HOST_ID)
+        loadFolders()
         window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
@@ -738,6 +793,14 @@ class MainActivity : Activity() {
         super.onResume()
         search.setText("")
         loadGlass(false)
+        NotifState.onChange = {
+            runOnUiThread {
+                if (!isDestroyed) {
+                    adapter.notifyDataSetChanged()
+                    refreshDock()
+                }
+            }
+        }
         loadApps()
         eventBox.removeCallbacks(tick)
         eventBox.post(tick)
@@ -746,8 +809,19 @@ class MainActivity : Activity() {
         applyBars()
     }
 
+    override fun onStart() {
+        super.onStart()
+        try { awHost.startListening() } catch (e: Exception) { }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        try { awHost.stopListening() } catch (e: Exception) { }
+    }
+
     override fun onPause() {
         super.onPause()
+        NotifState.onChange = null
         eventBox.removeCallbacks(tick)
         ring.removeCallbacks(netTick)
     }
@@ -760,6 +834,7 @@ class MainActivity : Activity() {
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         if (sheetOpen) hideSheet()
+        if (widgetsOpen) hideWidgets()
         search.setText("")
         hideKeyboard()
         grid.smoothScrollToPosition(0)
@@ -783,6 +858,7 @@ class MainActivity : Activity() {
     // Back (button or swipe gesture): close sheet -> clear search -> scroll to top -> stay home
     private fun handleBack(): Boolean {
         if (sheetOpen) { hideSheet(); return true }
+        if (widgetsOpen) { hideWidgets(); return true }
         if (search.text.isNotEmpty()) { search.setText(""); hideKeyboard(); return true }
         if (search.hasFocus()) { hideKeyboard(); return true }
         if (grid.firstVisiblePosition > 0) { grid.smoothScrollToPosition(0); return true }
@@ -891,6 +967,10 @@ class MainActivity : Activity() {
                     if (dy > 0) expandNotifications() else focusSearch()
                     return true
                 }
+                if (Math.abs(dx) > Math.abs(dy) && dx < -dp(60)) {
+                    showWidgets()
+                    return true
+                }
                 return false
             }
         })
@@ -960,6 +1040,16 @@ class MainActivity : Activity() {
         srLp.topMargin = dp(10)
         main.addView(searchRow, srLp)
 
+        // ---- recent apps row
+        recentBox = LinearLayout(this)
+        recentBox.gravity = Gravity.CENTER_VERTICAL
+        recentBox.setPadding(dp(14), dp(5), dp(10), dp(5))
+        recentBox.visibility = View.GONE
+        glass(recentBox, 22)
+        val rbLp = LinearLayout.LayoutParams(-1, -2)
+        rbLp.topMargin = dp(8)
+        main.addView(recentBox, rbLp)
+
         // ---- search extras (calculator, contacts, web)
         extraBox = LinearLayout(this)
         extraBox.orientation = LinearLayout.VERTICAL
@@ -984,8 +1074,17 @@ class MainActivity : Activity() {
                     c.orientation = LinearLayout.VERTICAL
                     c.gravity = Gravity.CENTER_HORIZONTAL
                     c.setPadding(0, dp(7), 0, dp(5))
+                    c.clipChildren = false
+                    val fl = FrameLayout(this@MainActivity)
+                    fl.clipChildren = false
                     val ic = ImageView(this@MainActivity)
-                    c.addView(ic, LinearLayout.LayoutParams(dp(50), dp(50)))
+                    fl.addView(ic, FrameLayout.LayoutParams(dp(50), dp(50)))
+                    val bd = newBadge()
+                    val bl = FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END)
+                    bl.topMargin = -dp(4)
+                    bl.rightMargin = -dp(5)
+                    fl.addView(bd, bl)
+                    c.addView(fl, LinearLayout.LayoutParams(-2, -2))
                     val lb = tv("", 10.5f, Color.WHITE)
                     lb.maxLines = 1
                     lb.ellipsize = TextUtils.TruncateAt.END
@@ -994,7 +1093,7 @@ class MainActivity : Activity() {
                     lb.setPadding(dp(2), dp(4), dp(2), 0)
                     c.addView(lb, LinearLayout.LayoutParams(-1, -2))
                     pressable(c)
-                    h = Holder(ic, lb)
+                    h = Holder(ic, lb, bd)
                     c.tag = h
                     cell = c
                 } else {
@@ -1010,6 +1109,7 @@ class MainActivity : Activity() {
                 lp.height = sz
                 h.icon.layoutParams = lp
                 h.icon.setImageDrawable(iconOf(a))
+                styleBadge(h.badge, badgeCount(a))
                 h.label.text = a.label
                 h.label.visibility = if (pBool("labels", true)) View.VISIBLE else View.GONE
                 return cell
@@ -1023,10 +1123,14 @@ class MainActivity : Activity() {
         grid.overScrollMode = View.OVER_SCROLL_NEVER
         grid.isVerticalFadingEdgeEnabled = true
         grid.setFadingEdgeLength(dp(22))
-        grid.setOnItemClickListener { _, _, i, _ -> launch(shown[i].pkg) }
+        grid.setOnItemClickListener { _, _, i, _ ->
+            val a = shown[i]
+            if (isFolder(a.pkg)) openFolderByKey(a.pkg) else launch(a.pkg)
+        }
         grid.setOnItemLongClickListener { v, _, i, _ ->
             haptic(v)
-            showSheet(shown[i], false)
+            val a = shown[i]
+            if (isFolder(a.pkg)) openFolderByKey(a.pkg) else showSheet(a, false)
             true
         }
 
@@ -1091,7 +1195,45 @@ class MainActivity : Activity() {
         sheet.visibility = View.GONE
         sheetGlass = glass(sheet, 30, 120)
 
+        // ---- widgets panel (swipe left on the clock area)
+        widgetPanel = FrameLayout(this)
+        widgetPanel.setBackgroundColor(Color.argb(190, 6, 8, 16))
+        widgetPanel.visibility = View.GONE
+        widgetPanel.isClickable = true
+        val wcol = LinearLayout(this)
+        wcol.orientation = LinearLayout.VERTICAL
+        wcol.setPadding(dp(14), dp(8), dp(14), dp(10))
+        val wbar = LinearLayout(this)
+        wbar.gravity = Gravity.CENTER_VERTICAL
+        wbar.addView(tv("Widgets", 20f, Color.WHITE, true), LinearLayout.LayoutParams(0, -2, 1f))
+        val wAdd = tv("Add", 14f, Color.rgb(20, 20, 28), true)
+        wAdd.gravity = Gravity.CENTER
+        wAdd.setPadding(dp(16), dp(8), dp(16), dp(8))
+        wAdd.background = bg(accent(), 16)
+        wAdd.setOnClickListener { showWidgetPicker() }
+        pressable(wAdd)
+        wbar.addView(wAdd)
+        val wDone = tv("Done", 14f, Color.WHITE, true)
+        wDone.gravity = Gravity.CENTER
+        wDone.setPadding(dp(16), dp(8), dp(16), dp(8))
+        wDone.background = bg(Color.argb(60, 255, 255, 255), 16)
+        wDone.setOnClickListener { hideWidgets() }
+        pressable(wDone)
+        val wdLp = LinearLayout.LayoutParams(-2, -2)
+        wdLp.leftMargin = dp(8)
+        wbar.addView(wDone, wdLp)
+        wcol.addView(wbar, LinearLayout.LayoutParams(-1, -2))
+        val wsv = ScrollView(this)
+        widgetList = LinearLayout(this)
+        widgetList.orientation = LinearLayout.VERTICAL
+        wsv.addView(widgetList, ViewGroup.LayoutParams(-1, -2))
+        val wsLp = LinearLayout.LayoutParams(-1, 0, 1f)
+        wsLp.topMargin = dp(10)
+        wcol.addView(wsv, wsLp)
+        widgetPanel.addView(wcol, FrameLayout.LayoutParams(-1, -1))
+
         root.addView(main, FrameLayout.LayoutParams(-1, -1))
+        root.addView(widgetPanel, FrameLayout.LayoutParams(-1, -1))
         root.addView(scrim, FrameLayout.LayoutParams(-1, -1))
         val shLp = FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM)
         shLp.setMargins(dp(8), 0, dp(8), dp(8))
@@ -1312,6 +1454,21 @@ class MainActivity : Activity() {
             }
         }, LinearLayout.LayoutParams(-1, -2))
 
+        body.addView(toggle("Notification badges", "badges", true) {
+            if (pBool("badges", true) && !notifAccess()) {
+                Toast.makeText(this, "Allow JLauncher in the list that opens next", Toast.LENGTH_LONG).show()
+                try { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } catch (e: Exception) { }
+            }
+            adapter.notifyDataSetChanged()
+            refreshDock()
+        }, LinearLayout.LayoutParams(-1, -2))
+        if (!notifAccess()) {
+            body.addView(linkRow("Allow notification access (needed for badges)") {
+                try { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } catch (e: Exception) { }
+            })
+        }
+        body.addView(toggle("Recent apps row", "recent", true) { filter() }, LinearLayout.LayoutParams(-1, -2))
+        body.addView(linkRow("Widgets") { hideSheet(); showWidgets() })
         body.addView(linkRow("Hidden apps") { showHidden() })
         body.addView(linkRow("Copy settings backup to clipboard") { backupSettings() })
         body.addView(linkRow("Restore settings from clipboard") { restoreSettings() })
@@ -1321,7 +1478,7 @@ class MainActivity : Activity() {
         reset.setOnClickListener {
             prefs.edit().remove("name").remove("blur").remove("dim").remove("cols")
                 .remove("icon").remove("events").remove("labels").remove("accent")
-                .remove("wx").remove("city").remove("ios").remove("contacts").remove("ring").remove("hidebar").apply()
+                .remove("wx").remove("city").remove("ios").remove("contacts").remove("ring").remove("hidebar").remove("badges").remove("recent").apply()
             cityDirty = true
             applySettings()
             loadApps()
@@ -1414,7 +1571,7 @@ class MainActivity : Activity() {
             val o = JSONObject()
             o.put("jl_backup", 1)
             for ((k, v) in prefs.all) {
-                if (k.startsWith("wx_") || k.startsWith("n_") || k == "askedStorage") continue
+                if (k.startsWith("wx_") || k.startsWith("n_") || k == "askedStorage" || k == "widgets" || k == "recent") continue
                 if (v is Int || v is Long || v is Boolean || v is String) o.put(k, v)
             }
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -1674,6 +1831,7 @@ class MainActivity : Activity() {
     private fun launch(pkg: String) {
         val i = packageManager.getLaunchIntentForPackage(pkg) ?: return
         prefs.edit().putInt("n_$pkg", pInt("n_$pkg", 0) + 1).apply()
+        pushRecent(pkg)
         val o = ActivityOptions.makeCustomAnimation(this, android.R.anim.fade_in, android.R.anim.fade_out)
         startActivity(i, o.toBundle())
     }
@@ -1703,6 +1861,19 @@ class MainActivity : Activity() {
         everything = list.sortedBy { it.label.lowercase() }
         val hidden = hiddenSet()
         all = everything.filter { !hidden.contains(it.pkg) }
+        if (list.isNotEmpty()) {
+            var changed = false
+            for (f in folders) {
+                if (f.pkgs.retainAll { riMap.containsKey(it) && !hidden.contains(it) }) changed = true
+            }
+            if (folders.removeAll { it.pkgs.isEmpty() }) changed = true
+            if (changed) saveFolders()
+        }
+        folderCache.clear()
+        val inFolder = HashSet<String>()
+        for (f in folders) inFolder.addAll(f.pkgs)
+        gridApps = (folders.map { App(it.name, "folder:" + it.id) } + all.filter { !inFolder.contains(it.pkg) })
+            .sortedBy { it.label.lowercase() }
         filter()
         refreshDock()
         styleMissing()
@@ -1723,7 +1894,7 @@ class MainActivity : Activity() {
         val q = search.text.toString().trim().lowercase()
         shown.clear()
         if (q.isEmpty()) {
-            shown.addAll(all)
+            shown.addAll(gridApps)
         } else {
             val m = all.filter { matches(it.label.lowercase(), q) }
             shown.addAll(m.sortedWith(
@@ -1740,6 +1911,7 @@ class MainActivity : Activity() {
             if (!letterIndex.containsKey(l)) letterIndex[l] = idx
         }
         strip.visibility = if (q.isEmpty()) View.VISIBLE else View.GONE
+        refreshRecent()
         updateExtras(q)
     }
 
@@ -1925,6 +2097,11 @@ class MainActivity : Activity() {
                 iv.setOnLongClickListener { haptic(iv); showSheet(a, true); true }
                 pressable(iv)
                 cell.addView(iv, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.CENTER))
+                val bd = newBadge()
+                styleBadge(bd, badgeCount(a))
+                val bl = FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END)
+                bl.topMargin = dp(1)
+                cell.addView(bd, bl)
             } else {
                 val slot = View(this)
                 val g = GradientDrawable()
@@ -1934,6 +2111,495 @@ class MainActivity : Activity() {
                 cell.addView(slot, FrameLayout.LayoutParams(dp(28), dp(28), Gravity.CENTER))
             }
             dockBox.addView(cell, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+    }
+
+    // ---------------------------------------------------------------- phase 2: badges, folders, recents, widgets
+
+    private fun notifAccess(): Boolean {
+        val s = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: return false
+        return s.contains(packageName)
+    }
+
+    private fun badgeCount(a: App): Int {
+        if (!pBool("badges", true)) return 0
+        val m = NotifState.counts
+        if (isFolder(a.pkg)) {
+            val f = folders.find { "folder:" + it.id == a.pkg } ?: return 0
+            var t = 0
+            for (p in f.pkgs) t += m[p] ?: 0
+            return t
+        }
+        return m[a.pkg] ?: 0
+    }
+
+    private fun newBadge(): TextView {
+        val t = tv("", 9f, Color.WHITE, true)
+        t.gravity = Gravity.CENTER
+        t.minWidth = dp(16)
+        t.minHeight = dp(16)
+        t.setPadding(dp(4), 0, dp(4), 0)
+        t.background = bg(Color.rgb(255, 69, 58), 9)
+        t.visibility = View.GONE
+        return t
+    }
+
+    private fun styleBadge(t: TextView, n: Int) {
+        if (n <= 0) {
+            t.visibility = View.GONE
+            return
+        }
+        t.text = if (n > 99) "99+" else n.toString()
+        t.visibility = View.VISIBLE
+    }
+
+    // ---- recent apps
+    private fun pushRecent(pkg: String) {
+        val l = (prefs.getString("recent", "") ?: "").split(",").filter { it.isNotEmpty() && it != pkg }.toMutableList()
+        l.add(0, pkg)
+        prefs.edit().putString("recent", l.take(8).joinToString(",")).apply()
+    }
+
+    private fun refreshRecent() {
+        recentBox.removeAllViews()
+        val show = pBool("recent", true) && search.text.isEmpty()
+        val list = (prefs.getString("recent", "") ?: "").split(",").filter { it.isNotEmpty() }
+            .mapNotNull { p -> all.find { it.pkg == p } }.take(5)
+        if (!show || list.isEmpty()) {
+            recentBox.visibility = View.GONE
+            return
+        }
+        recentBox.visibility = View.VISIBLE
+        val lab = tv("RECENT", 9f, accent(), true)
+        lab.letterSpacing = 0.2f
+        recentBox.addView(lab, LinearLayout.LayoutParams(0, -2, 1f))
+        for (a in list) {
+            val iv = ImageView(this)
+            iv.setImageDrawable(iconOf(a))
+            iv.setOnClickListener { launch(a.pkg) }
+            iv.setOnLongClickListener { haptic(iv); showSheet(a, false); true }
+            pressable(iv)
+            val lp = LinearLayout.LayoutParams(dp(34), dp(34))
+            lp.leftMargin = dp(10)
+            recentBox.addView(iv, lp)
+        }
+    }
+
+    // ---- folders
+    private fun isFolder(pkg: String) = pkg.startsWith("folder:")
+
+    private fun loadFolders() {
+        folders.clear()
+        try {
+            val a = JSONArray(prefs.getString("folders", "[]"))
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i)
+                val ps = o.getJSONArray("p")
+                val l = mutableListOf<String>()
+                for (k in 0 until ps.length()) l.add(ps.getString(k))
+                folders.add(Folder(o.getString("id"), o.getString("n"), l))
+            }
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun saveFolders() {
+        val a = JSONArray()
+        for (f in folders) {
+            val o = JSONObject()
+            o.put("id", f.id)
+            o.put("n", f.name)
+            val ps = JSONArray()
+            for (p in f.pkgs) ps.put(p)
+            o.put("p", ps)
+            a.put(o)
+        }
+        prefs.edit().putString("folders", a.toString()).apply()
+    }
+
+    private fun removeFromFolders(pkg: String) {
+        for (f in folders) f.pkgs.remove(pkg)
+        folders.removeAll { it.pkgs.isEmpty() }
+    }
+
+    private fun addToFolder(f: Folder, pkg: String) {
+        for (o in folders) if (o !== f) o.pkgs.remove(pkg)
+        if (!f.pkgs.contains(pkg)) f.pkgs.add(pkg)
+        folders.removeAll { it.pkgs.isEmpty() }
+        saveFolders()
+        loadApps()
+    }
+
+    private fun createFolder(name: String, pkg: String) {
+        for (o in folders) o.pkgs.remove(pkg)
+        folders.removeAll { it.pkgs.isEmpty() }
+        folders.add(Folder(System.currentTimeMillis().toString(), if (name.isBlank()) "Folder" else name, mutableListOf(pkg)))
+        saveFolders()
+        loadApps()
+    }
+
+    private fun drawIconInto(c: Canvas, d: Drawable, r: Rect) {
+        if (d is BitmapDrawable) {
+            c.drawBitmap(d.bitmap, null, r, Paint(Paint.FILTER_BITMAP_FLAG))
+            return
+        }
+        val copy = d.constantState?.newDrawable()?.mutate() ?: return
+        copy.setBounds(r.left, r.top, r.right, r.bottom)
+        copy.draw(c)
+    }
+
+    private fun folderIcon(key: String): Drawable {
+        val cached = folderCache[key]
+        if (cached != null) return cached
+        val f = folders.find { "folder:" + it.id == key } ?: return blank
+        val s = ICON_PX
+        val bmp = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val path = squirclePath(s.toFloat())
+        c.save()
+        c.clipPath(path)
+        val bp = Paint(Paint.ANTI_ALIAS_FLAG)
+        bp.shader = LinearGradient(0f, 0f, 0f, s.toFloat(),
+            Color.argb(120, 255, 255, 255), Color.argb(60, 255, 255, 255), Shader.TileMode.CLAMP)
+        c.drawColor(Color.argb(70, 14, 18, 30))
+        c.drawRect(0f, 0f, s.toFloat(), s.toFloat(), bp)
+        c.restore()
+        val ep = Paint(Paint.ANTI_ALIAS_FLAG)
+        ep.style = Paint.Style.STROKE
+        ep.strokeWidth = 1.5f
+        ep.color = Color.argb(80, 255, 255, 255)
+        c.drawPath(path, ep)
+        val apps = f.pkgs.mapNotNull { p -> everything.find { it.pkg == p } }.take(9)
+        val off = s * 0.11f
+        val cs = (s - 2 * off) / 3f
+        val isz = cs * 0.84f
+        for ((i, a) in apps.withIndex()) {
+            val d = iconOf(a)
+            val x = off + (i % 3) * cs + (cs - isz) / 2f
+            val y = off + (i / 3) * cs + (cs - isz) / 2f
+            drawIconInto(c, d, Rect(x.toInt(), y.toInt(), (x + isz).toInt(), (y + isz).toInt()))
+        }
+        val bd = BitmapDrawable(resources, bmp)
+        folderCache[key] = bd
+        return bd
+    }
+
+    private fun addRow(parent: LinearLayout, glyph: Int, label: String, danger: Boolean, go: () -> Unit) {
+        val row = LinearLayout(this)
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(24), 0, dp(24), 0)
+        val col = if (danger) Color.rgb(255, 154, 143) else accent()
+        row.addView(Glyph(glyph, col), LinearLayout.LayoutParams(dp(20), dp(20)))
+        val t = tv(label, 15f, if (danger) col else Color.WHITE)
+        t.setPadding(dp(14), 0, 0, 0)
+        row.addView(t)
+        row.setOnClickListener { go() }
+        parent.addView(row, LinearLayout.LayoutParams(-1, dp(52)))
+    }
+
+    private fun openFolderByKey(key: String) {
+        val f = folders.find { "folder:" + it.id == key } ?: return
+        showFolder(f)
+    }
+
+    private fun showFolder(f: Folder) {
+        sheet.removeAllViews()
+        sheet.addView(sheetHeader(f.name, null), LinearLayout.LayoutParams(-1, -2))
+        val sv = MaxScroll((resources.displayMetrics.heightPixels * 0.5f).toInt())
+        val body = LinearLayout(this)
+        body.orientation = LinearLayout.VERTICAL
+        body.setPadding(dp(16), dp(2), dp(16), dp(8))
+        sv.addView(body, ViewGroup.LayoutParams(-1, -2))
+        sheet.addView(sv, LinearLayout.LayoutParams(-1, -2))
+        val apps = f.pkgs.mapNotNull { p -> all.find { it.pkg == p } }
+        var row: LinearLayout? = null
+        for ((i, a) in apps.withIndex()) {
+            if (i % 4 == 0) {
+                row = LinearLayout(this)
+                body.addView(row, LinearLayout.LayoutParams(-1, -2))
+            }
+            val cell = LinearLayout(this)
+            cell.orientation = LinearLayout.VERTICAL
+            cell.gravity = Gravity.CENTER_HORIZONTAL
+            cell.setPadding(0, dp(8), 0, dp(6))
+            val ic = ImageView(this)
+            ic.setImageDrawable(iconOf(a))
+            cell.addView(ic, LinearLayout.LayoutParams(dp(52), dp(52)))
+            val lb = tv(a.label, 10.5f, Color.WHITE)
+            lb.maxLines = 1
+            lb.ellipsize = TextUtils.TruncateAt.END
+            lb.gravity = Gravity.CENTER
+            lb.setPadding(dp(2), dp(4), dp(2), 0)
+            cell.addView(lb, LinearLayout.LayoutParams(-1, -2))
+            pressable(cell)
+            cell.setOnClickListener { hideSheet(); launch(a.pkg) }
+            cell.setOnLongClickListener { haptic(cell); showSheet(a, false); true }
+            row!!.addView(cell, LinearLayout.LayoutParams(0, -2, 1f))
+        }
+        if (row != null && apps.size % 4 != 0) {
+            for (k in (apps.size % 4) until 4) row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        }
+        val footer = LinearLayout(this)
+        footer.orientation = LinearLayout.VERTICAL
+        addRow(footer, G_EDIT, "Rename folder", false) {
+            showNameSheet("Rename folder", f.name, "Save") { n ->
+                if (n.isNotBlank()) {
+                    f.name = n
+                    saveFolders()
+                    loadApps()
+                }
+            }
+        }
+        addRow(footer, G_TRASH, "Delete folder (apps go back to the grid)", true) {
+            folders.remove(f)
+            saveFolders()
+            hideSheet()
+            loadApps()
+        }
+        sheet.addView(footer, LinearLayout.LayoutParams(-1, -2))
+        sheet.addView(View(this), LinearLayout.LayoutParams(-1, dp(10)))
+        openSheet()
+    }
+
+    private fun showFolderPicker(app: App) {
+        sheet.removeAllViews()
+        sheet.addView(sheetHeader("Add to folder", iconOf(app)), LinearLayout.LayoutParams(-1, -2))
+        val sv = MaxScroll((resources.displayMetrics.heightPixels * 0.5f).toInt())
+        val body = LinearLayout(this)
+        body.orientation = LinearLayout.VERTICAL
+        body.setPadding(0, dp(2), 0, dp(12))
+        sv.addView(body, ViewGroup.LayoutParams(-1, -2))
+        sheet.addView(sv, LinearLayout.LayoutParams(-1, -2))
+        for (f in folders) {
+            addRow(body, G_FOLDER, f.name, false) {
+                hideSheet()
+                addToFolder(f, app.pkg)
+            }
+        }
+        addRow(body, G_PLUS, "New folder…", false) {
+            showNameSheet("New folder", "", "Create") { n -> createFolder(n, app.pkg) }
+        }
+        openSheet()
+    }
+
+    private fun showNameSheet(title: String, initial: String, okLabel: String, onOk: (String) -> Unit) {
+        sheet.removeAllViews()
+        sheet.addView(sheetHeader(title, null), LinearLayout.LayoutParams(-1, -2))
+        val body = LinearLayout(this)
+        body.orientation = LinearLayout.VERTICAL
+        body.setPadding(dp(24), dp(2), dp(24), dp(18))
+        val et = EditText(this)
+        et.setText(initial)
+        et.setSelection(et.text.length)
+        et.setTextColor(Color.WHITE)
+        et.setHintTextColor(Color.argb(140, 255, 255, 255))
+        et.hint = "Name"
+        et.textSize = 15f
+        et.isSingleLine = true
+        et.imeOptions = EditorInfo.IME_ACTION_DONE
+        et.background = bg(Color.argb(60, 255, 255, 255), 12)
+        et.setPadding(dp(14), dp(10), dp(14), dp(10))
+        body.addView(et, LinearLayout.LayoutParams(-1, -2))
+        val ok = tv(okLabel, 15f, Color.rgb(20, 20, 28), true)
+        ok.gravity = Gravity.CENTER
+        ok.background = bg(accent(), 14)
+        ok.setPadding(0, dp(12), 0, dp(12))
+        val okLp = LinearLayout.LayoutParams(-1, -2)
+        okLp.topMargin = dp(14)
+        body.addView(ok, okLp)
+        ok.setOnClickListener {
+            val t = et.text.toString().trim()
+            hideSheet()
+            onOk(t)
+        }
+        et.setOnEditorActionListener { _, _, _ -> ok.performClick(); true }
+        sheet.addView(body, LinearLayout.LayoutParams(-1, -2))
+        openSheet()
+        et.requestFocus()
+        et.postDelayed({
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.showSoftInput(et, InputMethodManager.SHOW_IMPLICIT)
+        }, 300)
+    }
+
+    // ---- widgets
+    private fun widgetIds(): MutableList<Int> {
+        val s = prefs.getString("widgets", "") ?: ""
+        return s.split(",").mapNotNull { it.toIntOrNull() }.toMutableList()
+    }
+
+    private fun saveWidgetIds(l: List<Int>) {
+        prefs.edit().putString("widgets", l.joinToString(",")).apply()
+    }
+
+    private fun showWidgets() {
+        if (widgetsOpen) return
+        widgetsOpen = true
+        refreshWidgets()
+        widgetPanel.animate().cancel()
+        widgetPanel.alpha = 0f
+        widgetPanel.visibility = View.VISIBLE
+        widgetPanel.animate().alpha(1f).setDuration(180).start()
+    }
+
+    private fun hideWidgets() {
+        if (!widgetsOpen) return
+        widgetsOpen = false
+        widgetPanel.animate().cancel()
+        widgetPanel.animate().alpha(0f).setDuration(150).withEndAction {
+            if (!widgetsOpen) widgetPanel.visibility = View.GONE
+        }.start()
+    }
+
+    private fun refreshWidgets() {
+        widgetList.removeAllViews()
+        val ids = widgetIds()
+        val keep = ArrayList<Int>()
+        for (id in ids) {
+            val info = awm.getAppWidgetInfo(id)
+            if (info == null) {
+                try { awHost.deleteAppWidgetId(id) } catch (e: Exception) { }
+                continue
+            }
+            keep.add(id)
+            val card = FrameLayout(this)
+            card.outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(v: View, o: Outline) {
+                    o.setRoundRect(0, 0, v.width, v.height, dpf(22f))
+                }
+            }
+            card.clipToOutline = true
+            card.setBackgroundColor(Color.argb(60, 255, 255, 255))
+            try {
+                val hv = awHost.createView(this, id, info)
+                card.addView(hv, FrameLayout.LayoutParams(-1, -1))
+            } catch (e: Exception) {
+                card.addView(tv("Widget unavailable", 13f, Color.WHITE))
+            }
+            val x = tv("×", 16f, Color.WHITE, true)
+            x.gravity = Gravity.CENTER
+            x.background = bg(Color.argb(150, 0, 0, 0), 14)
+            x.setOnClickListener {
+                try { awHost.deleteAppWidgetId(id) } catch (e: Exception) { }
+                val l = widgetIds()
+                l.remove(id)
+                saveWidgetIds(l)
+                refreshWidgets()
+            }
+            val xLp = FrameLayout.LayoutParams(dp(28), dp(28), Gravity.TOP or Gravity.END)
+            xLp.topMargin = dp(6)
+            xLp.rightMargin = dp(6)
+            card.addView(x, xLp)
+            val h = info.minHeight.coerceIn(dp(100), dp(420))
+            val lp = LinearLayout.LayoutParams(-1, h)
+            lp.bottomMargin = dp(12)
+            widgetList.addView(card, lp)
+        }
+        if (keep.size != ids.size) saveWidgetIds(keep)
+        if (keep.isEmpty()) {
+            val t = tv("No widgets yet. Tap Add to place one.", 14f, Color.argb(200, 255, 255, 255))
+            t.setPadding(dp(4), dp(20), dp(4), 0)
+            widgetList.addView(t)
+        }
+    }
+
+    private fun showWidgetPicker() {
+        sheet.removeAllViews()
+        sheet.addView(sheetHeader("Add a widget", null), LinearLayout.LayoutParams(-1, -2))
+        val sv = MaxScroll((resources.displayMetrics.heightPixels * 0.55f).toInt())
+        val body = LinearLayout(this)
+        body.orientation = LinearLayout.VERTICAL
+        body.setPadding(dp(24), dp(2), dp(24), dp(14))
+        sv.addView(body, ViewGroup.LayoutParams(-1, -2))
+        sheet.addView(sv, LinearLayout.LayoutParams(-1, -2))
+        val pm = packageManager
+        val list = try { awm.installedProviders } catch (e: Exception) { emptyList<AppWidgetProviderInfo>() }
+        val rows = list.map { info ->
+            val app = try { pm.getApplicationLabel(pm.getApplicationInfo(info.provider.packageName, 0)).toString() } catch (e: Exception) { info.provider.packageName }
+            val label = try { info.loadLabel(pm) } catch (e: Exception) { app }
+            Triple(app, label, info)
+        }.sortedBy { it.first.lowercase() + it.second.lowercase() }
+        if (rows.isEmpty()) {
+            body.addView(tv("No widgets available on this phone", 14f, Color.argb(190, 255, 255, 255)))
+        }
+        for ((app, label, info) in rows) {
+            val row = LinearLayout(this)
+            row.orientation = LinearLayout.VERTICAL
+            row.setPadding(0, dp(9), 0, dp(9))
+            row.addView(tv(label, 15f, Color.WHITE, true))
+            row.addView(tv(app, 11f, Color.argb(170, 255, 255, 255)))
+            row.setOnClickListener {
+                hideSheet()
+                startBind(info)
+            }
+            body.addView(row, LinearLayout.LayoutParams(-1, -2))
+        }
+        openSheet()
+    }
+
+    private fun startBind(info: AppWidgetProviderInfo) {
+        val id = awHost.allocateAppWidgetId()
+        pendingWidgetId = id
+        val ok = try { awm.bindAppWidgetIdIfAllowed(id, info.provider) } catch (e: Exception) { false }
+        if (ok) {
+            configureOrFinish(id, info)
+        } else {
+            val i = Intent(AppWidgetManager.ACTION_APPWIDGET_BIND)
+            i.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id)
+            i.putExtra(AppWidgetManager.EXTRA_APPWIDGET_PROVIDER, info.provider)
+            try {
+                @Suppress("DEPRECATION")
+                startActivityForResult(i, REQ_BIND)
+            } catch (e: Exception) {
+                awHost.deleteAppWidgetId(id)
+                Toast.makeText(this, "Could not add this widget", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun configureOrFinish(id: Int, info: AppWidgetProviderInfo) {
+        if (info.configure != null) {
+            try {
+                awHost.startAppWidgetConfigureActivityForResult(this, id, 0, REQ_CONFIG, null)
+            } catch (e: Exception) {
+                finishWidget(id)
+            }
+        } else {
+            finishWidget(id)
+        }
+    }
+
+    private fun finishWidget(id: Int) {
+        val l = widgetIds()
+        if (!l.contains(id)) l.add(id)
+        saveWidgetIds(l)
+        pendingWidgetId = -1
+        if (widgetsOpen) refreshWidgets()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        val id = pendingWidgetId
+        if (id < 0) return
+        when (requestCode) {
+            REQ_BIND -> {
+                val info = awm.getAppWidgetInfo(id)
+                if (resultCode == RESULT_OK && info != null) {
+                    configureOrFinish(id, info)
+                } else {
+                    try { awHost.deleteAppWidgetId(id) } catch (e: Exception) { }
+                    pendingWidgetId = -1
+                }
+            }
+            REQ_CONFIG -> {
+                if (resultCode == RESULT_OK) {
+                    finishWidget(id)
+                } else {
+                    try { awHost.deleteAppWidgetId(id) } catch (e: Exception) { }
+                    pendingWidgetId = -1
+                }
+            }
         }
     }
 
@@ -1973,10 +2639,22 @@ class MainActivity : Activity() {
         } else {
             acts.add(Act("Add to dock", G_PIN, false) { addToDock(app.pkg) })
         }
+        val inF = folders.find { it.pkgs.contains(app.pkg) }
+        if (inF != null) {
+            acts.add(Act("Remove from folder", G_FOLDER, false) {
+                removeFromFolders(app.pkg)
+                saveFolders()
+                loadApps()
+            })
+        } else {
+            acts.add(Act("Add to folder", G_FOLDER, false) { showFolderPicker(app) })
+        }
         acts.add(Act("Hide app", G_EYE, false) {
             val s = hiddenSet()
             s.add(app.pkg)
             saveHidden(s)
+            removeFromFolders(app.pkg)
+            saveFolders()
             removeFromDock(app.pkg)
             loadApps()
             Toast.makeText(this, app.label + " hidden. Settings > Hidden apps to bring it back.", Toast.LENGTH_LONG).show()
@@ -2080,8 +2758,10 @@ class MainActivity : Activity() {
         sheet.animate().translationY(sheet.height.toFloat()).setDuration(180)
             .setUpdateListener { sheetGlass?.invalidateSelf() }
             .withEndAction {
-                sheet.visibility = View.GONE
-                scrim.visibility = View.GONE
+                if (!sheetOpen) {
+                    sheet.visibility = View.GONE
+                    scrim.visibility = View.GONE
+                }
             }.start()
     }
 
@@ -2108,5 +2788,43 @@ class MainActivity : Activity() {
                 else -> false
             }
         }
+    }
+}
+
+// shared notification counts (filled by NotifService, read by the launcher for icon badges)
+object NotifState {
+    @Volatile var counts: Map<String, Int> = emptyMap()
+    @Volatile var onChange: (() -> Unit)? = null
+}
+
+class NotifService : NotificationListenerService() {
+    override fun onListenerConnected() {
+        recount()
+    }
+
+    override fun onNotificationPosted(sbn: StatusBarNotification?) {
+        recount()
+    }
+
+    override fun onNotificationRemoved(sbn: StatusBarNotification?) {
+        recount()
+    }
+
+    private fun recount() {
+        val m = HashMap<String, Int>()
+        try {
+            val list = activeNotifications
+            if (list != null) {
+                for (n in list) {
+                    val f = n.notification.flags
+                    if (f and Notification.FLAG_ONGOING_EVENT != 0) continue
+                    if (f and Notification.FLAG_GROUP_SUMMARY != 0) continue
+                    m[n.packageName] = (m[n.packageName] ?: 0) + 1
+                }
+            }
+        } catch (e: Exception) {
+        }
+        NotifState.counts = m
+        NotifState.onChange?.invoke()
     }
 }
